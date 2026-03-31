@@ -1,0 +1,183 @@
+use std::thread;
+use std::time::{Duration, Instant};
+
+use systemcore::{
+    DriverMode, ProcessBehavior, ProcessContext, ProcessHandle, Success, SystemDebugging,
+    application_close, drive_until_finished, level_log_set,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChildState {
+    Start,
+    Main,
+    Talk,
+}
+
+struct ChildExecuting {
+    state: ChildState,
+    as_service: bool,
+    delay_shutdown: bool,
+    start: Option<Instant>,
+    told_ya: bool,
+}
+
+impl ChildExecuting {
+    fn new() -> Self {
+        Self {
+            state: ChildState::Start,
+            as_service: false,
+            delay_shutdown: false,
+            start: None,
+            told_ya: false,
+        }
+    }
+}
+
+impl ProcessBehavior for ChildExecuting {
+    fn name(&self) -> &str {
+        "ChildExecuting"
+    }
+
+    fn process(&mut self, ctx: &mut ProcessContext) -> Success {
+        match self.state {
+            ChildState::Start => {
+                if !self.as_service {
+                    ctx.info("I will wait some time.");
+                    self.start = Some(Instant::now());
+                    self.state = ChildState::Talk;
+                } else {
+                    self.state = ChildState::Main;
+                }
+                Success::Pending
+            }
+            ChildState::Main => Success::Pending,
+            ChildState::Talk => {
+                if self
+                    .start
+                    .is_some_and(|start| start.elapsed() < Duration::from_secs(5))
+                {
+                    return Success::Pending;
+                }
+
+                ctx.info("Waiting done.");
+                Success::Positive
+            }
+        }
+    }
+
+    fn shutdown(&mut self, ctx: &mut ProcessContext) -> Success {
+        if !self.delay_shutdown {
+            ctx.warn("I am not used anymore!");
+            return Success::Positive;
+        }
+
+        if !self.told_ya {
+            self.told_ya = true;
+            ctx.warn("I am not used anymore!");
+            ctx.warn("I will delay my shutdown for one cycle.");
+            return Success::Pending;
+        }
+
+        Success::Positive
+    }
+
+    fn process_info(&self) -> Vec<String> {
+        vec![
+            format!("State\t\t\t{:?}", self.state),
+            format!(
+                "Service process\t\t{}",
+                if self.as_service { "Yes" } else { "No" }
+            ),
+            format!(
+                "Shutdown will be delayed\t{}",
+                if self.delay_shutdown { "Yes" } else { "No" }
+            ),
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IntroState {
+    Start,
+    Main,
+}
+
+struct Introducing {
+    state: IntroState,
+    threaded_child: Option<ProcessHandle>,
+    debugger_started: bool,
+}
+
+impl Introducing {
+    fn new() -> Self {
+        Self {
+            state: IntroState::Start,
+            threaded_child: None,
+            debugger_started: false,
+        }
+    }
+}
+
+impl ProcessBehavior for Introducing {
+    fn name(&self) -> &str {
+        "Introducing"
+    }
+
+    fn process(&mut self, ctx: &mut ProcessContext) -> Success {
+        match self.state {
+            IntroState::Start => {
+                level_log_set(5);
+
+                if !self.debugger_started {
+                    let mut debugger = SystemDebugging::new(ctx.current());
+                    debugger.listen_local_set();
+                    let debugger = ProcessHandle::new(debugger);
+                    ctx.start(debugger, DriverMode::Parent);
+                    self.debugger_started = true;
+                }
+
+                for idx in 0..3 {
+                    let mut child = ChildExecuting::new();
+                    child.as_service = idx != 1;
+                    child.delay_shutdown = idx == 2;
+                    let handle = ProcessHandle::new(child);
+
+                    let driver = if idx == 0 {
+                        DriverMode::NewInternalDriver
+                    } else {
+                        DriverMode::Parent
+                    };
+                    let handle = ctx.start(handle, driver);
+
+                    if idx == 1 {
+                        self.threaded_child = Some(handle);
+                    }
+                }
+
+                ctx.info("Hello!");
+                self.state = IntroState::Main;
+                Success::Pending
+            }
+            IntroState::Main => match self.threaded_child.as_ref().map(ProcessHandle::success) {
+                Some(Success::Positive) => Success::Positive,
+                Some(Success::Negative(code)) => Success::Negative(code),
+                _ => Success::Pending,
+            },
+        }
+    }
+
+    fn process_info(&self) -> Vec<String> {
+        vec![format!("State\t\t\t{:?}", self.state)]
+    }
+}
+
+fn main() {
+    let app = ProcessHandle::new(Introducing::new());
+    let success = drive_until_finished(&app, 12, Duration::from_millis(15));
+    application_close();
+
+    if !success.is_positive() {
+        thread::sleep(Duration::from_millis(50));
+        std::process::exit(1);
+    }
+}

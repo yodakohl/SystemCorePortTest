@@ -1,0 +1,9 @@
+[package]
+name = "systemcore"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Rust port of fractal-programming/SystemCore"
+repository = "https://github.com/yodakohl/SystemCorePortTest"
+
+[dependencies]
