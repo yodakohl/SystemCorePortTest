@@ -1,24 +1,72 @@
+use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 
 #[derive(Debug)]
 pub struct TcpListening {
-    listener: TcpListener,
+    listeners: Vec<TcpListener>,
     max_conn_queued: usize,
     peers: VecDeque<TcpTransfering>,
+    bind_addrs: Vec<SocketAddr>,
+    connections_created: usize,
 }
 
 impl TcpListening {
     pub fn bind(port: u16, local_only: bool) -> io::Result<Self> {
-        let host = if local_only { "127.0.0.1" } else { "0.0.0.0" };
-        let listener = TcpListener::bind((host, port))?;
-        listener.set_nonblocking(true)?;
+        let mut listeners = Vec::new();
+        let mut bind_addrs = Vec::new();
+
+        let (listener_v4, addr_v4) = Self::bind_one(SocketAddr::from((
+            if local_only {
+                Ipv4Addr::LOCALHOST
+            } else {
+                Ipv4Addr::UNSPECIFIED
+            },
+            port,
+        )))?;
+        listeners.push(listener_v4);
+        bind_addrs.push(addr_v4);
+
+        if let Ok((listener_v6, addr_v6)) = Self::bind_one(SocketAddr::from((
+            if local_only {
+                Ipv6Addr::LOCALHOST
+            } else {
+                Ipv6Addr::UNSPECIFIED
+            },
+            port,
+        ))) {
+            listeners.push(listener_v6);
+            bind_addrs.push(addr_v6);
+        }
+
         Ok(Self {
-            listener,
+            listeners,
             max_conn_queued: 200,
             peers: VecDeque::new(),
+            bind_addrs,
+            connections_created: 0,
         })
+    }
+
+    fn bind_one(addr: SocketAddr) -> io::Result<(TcpListener, SocketAddr)> {
+        let domain = if addr.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
+        let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+        if addr.is_ipv6() {
+            socket.set_only_v6(true)?;
+        }
+        socket.set_reuse_address(true)?;
+        socket.set_nonblocking(true)?;
+        socket.bind(&addr.into())?;
+        socket.listen(8192)?;
+
+        let listener: TcpListener = socket.into();
+        let local_addr = listener.local_addr()?;
+        Ok((listener, local_addr))
     }
 
     pub fn max_conn_queued_set(&mut self, max_conn_queued: usize) {
@@ -27,18 +75,21 @@ impl TcpListening {
 
     pub fn accept_ready(&mut self) -> io::Result<usize> {
         let mut accepted = 0usize;
-        loop {
-            if self.peers.len() >= self.max_conn_queued {
-                break;
-            }
-
-            match self.listener.accept() {
-                Ok((stream, _)) => {
-                    self.peers.push_back(TcpTransfering::from_stream(stream)?);
-                    accepted += 1;
+        for listener in &self.listeners {
+            loop {
+                if self.peers.len() >= self.max_conn_queued {
+                    return Ok(accepted);
                 }
-                Err(err) if err.kind() == ErrorKind::WouldBlock => break,
-                Err(err) => return Err(err),
+
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        self.peers.push_back(TcpTransfering::from_stream(stream)?);
+                        self.connections_created += 1;
+                        accepted += 1;
+                    }
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                    Err(err) => return Err(err),
+                }
             }
         }
         Ok(accepted)
@@ -46,6 +97,33 @@ impl TcpListening {
 
     pub fn next_peer(&mut self) -> Option<TcpTransfering> {
         self.peers.pop_front()
+    }
+
+    pub fn addresses(&self) -> &[SocketAddr] {
+        &self.bind_addrs
+    }
+
+    pub fn address_summary(&self) -> String {
+        self.bind_addrs
+            .iter()
+            .map(format_socket_addr)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    pub fn connections_created(&self) -> usize {
+        self.connections_created
+    }
+
+    pub fn queue_len(&self) -> usize {
+        self.peers.len()
+    }
+}
+
+pub fn format_socket_addr(addr: &SocketAddr) -> String {
+    match addr {
+        SocketAddr::V4(addr) => format!("{}:{}", addr.ip(), addr.port()),
+        SocketAddr::V6(addr) => format!("[{}]:{}", addr.ip(), addr.port()),
     }
 }
 

@@ -13,6 +13,16 @@ enum ChildState {
     Talk,
 }
 
+impl ChildState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Start => "StStart",
+            Self::Main => "StMain",
+            Self::Talk => "StTalk",
+        }
+    }
+}
+
 struct ChildExecuting {
     state: ChildState,
     as_service: bool,
@@ -83,7 +93,7 @@ impl ProcessBehavior for ChildExecuting {
 
     fn process_info(&self) -> Vec<String> {
         vec![
-            format!("State\t\t\t{:?}", self.state),
+            format!("State\t\t\t{}", self.state.label()),
             format!(
                 "Service process\t\t{}",
                 if self.as_service { "Yes" } else { "No" }
@@ -100,6 +110,15 @@ impl ProcessBehavior for ChildExecuting {
 enum IntroState {
     Start,
     Main,
+}
+
+impl IntroState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Start => "StStart",
+            Self::Main => "StMain",
+        }
+    }
 }
 
 struct Introducing {
@@ -129,9 +148,7 @@ impl ProcessBehavior for Introducing {
                 level_log_set(5);
 
                 if !self.debugger_started {
-                    let mut debugger = SystemDebugging::new(ctx.current());
-                    debugger.listen_local_set();
-                    let debugger = ProcessHandle::new(debugger);
+                    let debugger = ProcessHandle::new(SystemDebugging::new(ctx.current()));
                     ctx.start(debugger, DriverMode::Parent);
                     self.debugger_started = true;
                 }
@@ -167,7 +184,7 @@ impl ProcessBehavior for Introducing {
     }
 
     fn process_info(&self) -> Vec<String> {
-        vec![format!("State\t\t\t{:?}", self.state)]
+        vec![format!("State\t\t\t{}", self.state.label())]
     }
 }
 

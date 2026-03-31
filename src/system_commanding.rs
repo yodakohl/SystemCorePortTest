@@ -7,7 +7,7 @@ pub const INTERNAL_CMD_CLASS: &str = "dbg";
 const HISTORY_MAX: usize = 5;
 const SIZE_CMD_ID_MAX: usize = 16;
 const PROMPT_PREFIX: &str = "core@app:~# ";
-const WELCOME_MSG: &str = "\r\nsystemcore\r\nSystem Terminal\r\n\r\ntype 'help' or just 'h' for a list of available commands\r\n\r\n";
+const WELCOME_MSG: &str = "\r\n<unknown package>\r\nSystem Terminal\r\n\r\ntype 'help' or just 'h' for a list of available commands\r\n\r\n";
 
 pub type CommandHandler = Arc<dyn Fn(&str, &CommandRegistry) -> String + Send + Sync>;
 
@@ -324,6 +324,7 @@ pub struct SystemCommanding {
     cursor: usize,
     history: Vec<String>,
     history_view: Option<usize>,
+    last_command: Option<String>,
     mode_auto: bool,
     tab_last: bool,
     parser_state: ParserState,
@@ -345,6 +346,10 @@ impl SystemCommanding {
 
     pub fn mode_auto_set(&mut self) {
         self.mode_auto = true;
+    }
+
+    pub fn last_command(&self) -> Option<&str> {
+        self.last_command.as_deref()
     }
 
     pub fn on_connect(&mut self) -> Vec<Vec<u8>> {
@@ -386,6 +391,9 @@ impl SystemCommanding {
                 match *byte {
                     b'\r' | b'\n' | 0 => {
                         let line = String::from_utf8_lossy(&self.line).trim().to_owned();
+                        if !line.is_empty() {
+                            self.last_command = Some(line.clone());
+                        }
                         output
                             .chunks
                             .push(registry.execute_line(&line).into_bytes());
@@ -499,6 +507,7 @@ impl SystemCommanding {
 
         let line = String::from_utf8_lossy(&self.line).trim().to_owned();
         if !line.is_empty() {
+            self.last_command = Some(line.clone());
             self.history_insert(&line);
             let response = registry.execute_line(&line);
             if !response.is_empty() {

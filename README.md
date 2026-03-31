@@ -11,7 +11,7 @@ This repository keeps the original project’s core model:
 - broadcast pipes
 - TCP-based debugging endpoints
 
-The port is intentionally Rust-native rather than a line-for-line transliteration of the C++ sources. Ownership is `Arc`/`Mutex`-based instead of raw-pointer-based, but the host-side behavior is aligned against the original C++ implementation with direct conformance tests.
+The port is intentionally Rust-native rather than a line-for-line transliteration of the C++ sources. Ownership is `Arc`/`Mutex`-based instead of raw-pointer-based, but the host-side behavior is aligned against the original C++ implementation with direct conformance tests and side-by-side execution of the upstream `tools/hello-world` example.
 
 ## Status
 
@@ -29,6 +29,18 @@ Implemented:
 - single-wire protocol enums from `SingleWire.h`
 - conformance tests for scheduler lifecycle, tree rendering, command behavior, and debugger socket flows
 
+Validated directly against the original C++ hello-world binary:
+
+- command welcome/help behavior on port `3004`
+- auto-command behavior on port `3006`
+- process-tree structure and details on port `3000`
+- debugger listener layout and active-session rendering
+
+Still not byte-for-byte equivalent:
+
+- console and socket log formatting
+- upstream core-log verbosity and source-location-rich log output
+
 Not yet ported:
 
 - ESP-IDF-specific `EspWifiConnecting`
@@ -45,10 +57,10 @@ cargo run --example hello_world
 
 The hello-world example starts the debugger on:
 
-- process tree: `localhost:3000`
-- log stream: `localhost:3002`
-- command stream: `localhost:3004`
-- auto-command stream: `localhost:3006`
+- process tree: `0.0.0.0:3000` and `[::]:3000`
+- log stream: `0.0.0.0:3002` and `[::]:3002`
+- command stream: `0.0.0.0:3004` and `[::]:3004`
+- auto-command stream: `0.0.0.0:3006` and `[::]:3006`
 
 ## Source Mapping
 

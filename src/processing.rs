@@ -51,6 +51,10 @@ pub trait ProcessBehavior: Send + 'static {
     fn process_info(&self) -> Vec<String> {
         Vec::new()
     }
+
+    fn process_tree_extra_lines(&self, _options: ProcessRenderOptions) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -106,6 +110,8 @@ struct RuntimeState {
     shutdown_done: bool,
     undriven: bool,
     tree_hidden: bool,
+    info_cache: Vec<String>,
+    extra_tree_cache: Vec<String>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -127,6 +133,8 @@ impl RuntimeState {
             shutdown_done: false,
             undriven: false,
             tree_hidden: false,
+            info_cache: Vec::new(),
+            extra_tree_cache: Vec::new(),
             worker: None,
         }
     }
@@ -282,6 +290,16 @@ impl ProcessContext {
 }
 
 impl ProcessHandle {
+    pub(crate) fn refresh_render_cache_with_options(
+        &self,
+        behavior: &dyn ProcessBehavior,
+        options: ProcessRenderOptions,
+    ) {
+        let mut runtime = self.inner.runtime.lock().unwrap();
+        runtime.info_cache = behavior.process_info();
+        runtime.extra_tree_cache = behavior.process_tree_extra_lines(options);
+    }
+
     pub fn new<B>(behavior: B) -> Self
     where
         B: ProcessBehavior,
@@ -327,7 +345,12 @@ impl ProcessHandle {
                 let result = {
                     let mut behavior = self.inner.behavior.lock().unwrap();
                     let mut ctx = ProcessContext::new(self.clone());
-                    behavior.initialize(&mut ctx)
+                    let result = behavior.initialize(&mut ctx);
+                    self.refresh_render_cache_with_options(
+                        behavior.as_ref(),
+                        ProcessRenderOptions::default(),
+                    );
+                    result
                 };
 
                 if result.is_pending() {
@@ -357,7 +380,12 @@ impl ProcessHandle {
                 let result = {
                     let mut behavior = self.inner.behavior.lock().unwrap();
                     let mut ctx = ProcessContext::new(self.clone());
-                    behavior.process(&mut ctx)
+                    let result = behavior.process(&mut ctx);
+                    self.refresh_render_cache_with_options(
+                        behavior.as_ref(),
+                        ProcessRenderOptions::default(),
+                    );
+                    result
                 };
 
                 if result.is_pending() {
@@ -373,7 +401,12 @@ impl ProcessHandle {
                 let result = {
                     let mut behavior = self.inner.behavior.lock().unwrap();
                     let mut ctx = ProcessContext::new(self.clone());
-                    behavior.shutdown(&mut ctx)
+                    let result = behavior.shutdown(&mut ctx);
+                    self.refresh_render_cache_with_options(
+                        behavior.as_ref(),
+                        ProcessRenderOptions::default(),
+                    );
+                    result
                 };
 
                 if result.is_pending() {
@@ -459,11 +492,22 @@ impl ProcessHandle {
                 runtime.level_driver,
                 runtime.driver_mode,
                 runtime.state,
+                runtime.info_cache.clone(),
+                runtime.extra_tree_cache.clone(),
                 runtime.children.clone(),
             )
         };
 
-        let (success, level_tree, level_driver, driver_mode, state, children) = snapshot;
+        let (
+            success,
+            level_tree,
+            level_driver,
+            driver_mode,
+            state,
+            info_cache,
+            extra_tree_cache,
+            children,
+        ) = snapshot;
         let marker = match success {
             Success::Pending => '-',
             Success::Positive => '+',
@@ -474,17 +518,20 @@ impl ProcessHandle {
         out.push(marker);
         out.push(' ');
 
+        let mut reset_color_after_name = false;
         match driver_mode {
             DriverMode::ExternalDriver => {
                 if options.colored {
-                    out.push_str("\x1b[38;5;135m### \x1b[0m");
+                    out.push_str("\x1b[38;5;135m");
+                    reset_color_after_name = true;
                 } else {
                     out.push_str("### ");
                 }
             }
             DriverMode::NewInternalDriver => {
                 if options.colored {
-                    out.push_str("\x1b[38;5;81m*** \x1b[0m");
+                    out.push_str("\x1b[38;5;81m");
+                    reset_color_after_name = true;
                 } else {
                     out.push_str("*** ");
                 }
@@ -494,18 +541,34 @@ impl ProcessHandle {
 
         if options.colored && level_driver == 0 {
             out.push_str("\x1b[38;5;40m");
+            reset_color_after_name = true;
             out.push_str(&self.name());
             out.push_str("\x1b[0m");
         } else {
             out.push_str(&self.name());
         }
         out.push_str("()\r\n");
+        if options.colored && reset_color_after_name {
+            out.push_str("\x1b[37m");
+        }
 
-        if options.detailed
-            && state != AbstractState::Finished
-            && let Ok(behavior) = self.inner.behavior.try_lock()
-        {
-            for line in behavior.process_info() {
+        if options.detailed && state != AbstractState::Finished {
+            let (info_lines, extra_lines) = if let Ok(behavior) = self.inner.behavior.try_lock() {
+                (
+                    behavior.process_info(),
+                    behavior.process_tree_extra_lines(options),
+                )
+            } else {
+                (info_cache, extra_tree_cache)
+            };
+
+            for line in info_lines {
+                out.push_str(&" ".repeat(level_tree as usize * 2 + 2));
+                out.push_str(&line);
+                out.push_str("\r\n");
+            }
+
+            for line in extra_lines {
                 out.push_str(&" ".repeat(level_tree as usize * 2 + 2));
                 out.push_str(&line);
                 out.push_str("\r\n");

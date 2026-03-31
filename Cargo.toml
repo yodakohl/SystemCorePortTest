@@ -7,3 +7,4 @@ description = "Rust port of fractal-programming/SystemCore"
 repository = "https://github.com/yodakohl/SystemCorePortTest"
 
 [dependencies]
+socket2 = "0.5"

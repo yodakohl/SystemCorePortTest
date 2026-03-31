@@ -1,11 +1,12 @@
 use crate::logging::{LogSeverity, level_log_set, subscribe_logs};
-use crate::net::{TcpListening, TcpTransfering};
+use crate::net::{TcpListening, TcpTransfering, format_socket_addr};
 use crate::processing::{
     ProcessBehavior, ProcessContext, ProcessHandle, ProcessRenderOptions, Success,
 };
 use crate::system_commanding::{
     INTERNAL_CMD_CLASS, SystemCommanding, cmd_reg, command_registry_snapshot,
 };
+use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -74,44 +75,6 @@ impl SystemDebugging {
             }),
             "",
             "Set the log level for socket",
-            INTERNAL_CMD_CLASS,
-        );
-
-        let _ = cmd_reg(
-            "procTreeDetailedToggle",
-            std::sync::Arc::new(|args: &str, _registry| {
-                let enabled = match args.trim() {
-                    "0" | "false" | "off" => false,
-                    "1" | "true" | "on" => true,
-                    _ => !TREE_DETAILED.load(Ordering::Relaxed),
-                };
-                TREE_DETAILED.store(enabled, Ordering::Relaxed);
-                format!(
-                    "Detailed process tree output {}",
-                    if enabled { "enabled" } else { "disabled" }
-                )
-            }),
-            "",
-            "Toggle detailed process-tree output",
-            INTERNAL_CMD_CLASS,
-        );
-
-        let _ = cmd_reg(
-            "procTreeColoredToggle",
-            std::sync::Arc::new(|args: &str, _registry| {
-                let enabled = match args.trim() {
-                    "0" | "false" | "off" => false,
-                    "1" | "true" | "on" => true,
-                    _ => !TREE_COLORED.load(Ordering::Relaxed),
-                };
-                TREE_COLORED.store(enabled, Ordering::Relaxed);
-                format!(
-                    "Colored process tree output {}",
-                    if enabled { "enabled" } else { "disabled" }
-                )
-            }),
-            "",
-            "Toggle colored process-tree output",
             INTERNAL_CMD_CLASS,
         );
 
@@ -389,6 +352,80 @@ impl SystemDebugging {
             });
         }
     }
+
+    fn push_virtual_child(
+        lines: &mut Vec<String>,
+        name: &str,
+        details: impl IntoIterator<Item = String>,
+    ) {
+        lines.push(format!("- {name}()"));
+        for detail in details {
+            lines.push(format!("  {detail}"));
+        }
+    }
+
+    fn listener_details(listener: &TcpListening) -> Vec<String> {
+        vec![
+            listener.address_summary(),
+            format!("Connections created\t{}", listener.connections_created()),
+            format!("Queue\t\t\t{}", listener.queue_len()),
+        ]
+    }
+
+    fn transfer_details(connection: &TcpTransfering) -> Vec<String> {
+        let mut details = vec![format!("Bytes received\t\t{}", connection.bytes_received())];
+
+        if let (Some(local), Some(remote)) = (connection.addr_local(), connection.addr_remote()) {
+            let mut endpoints = String::new();
+            let _ = write!(
+                endpoints,
+                "{} <--> {}",
+                format_socket_addr(&local),
+                format_socket_addr(&remote)
+            );
+            details.push(endpoints);
+        }
+
+        details
+    }
+
+    fn process_tree_extra_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+
+        if let Some(listener) = &self.proc_listener {
+            Self::push_virtual_child(&mut lines, "TcpListening", Self::listener_details(listener));
+        }
+        if let Some(listener) = &self.log_listener {
+            Self::push_virtual_child(&mut lines, "TcpListening", Self::listener_details(listener));
+        }
+        if let Some(listener) = &self.cmd_listener {
+            Self::push_virtual_child(&mut lines, "TcpListening", Self::listener_details(listener));
+        }
+        if let Some(listener) = &self.cmd_auto_listener {
+            Self::push_virtual_child(&mut lines, "TcpListening", Self::listener_details(listener));
+        }
+
+        for peer in &self.command_peers {
+            Self::push_virtual_child(
+                &mut lines,
+                "SystemCommanding",
+                [format!(
+                    "Last command\t\t{}",
+                    peer.session.last_command().unwrap_or("<none>")
+                )],
+            );
+        }
+
+        for peer in &self.peers {
+            Self::push_virtual_child(
+                &mut lines,
+                "TcpTransfering",
+                Self::transfer_details(&peer.connection),
+            );
+        }
+
+        lines
+    }
 }
 
 impl ProcessBehavior for SystemDebugging {
@@ -405,6 +442,13 @@ impl ProcessBehavior for SystemDebugging {
         self.accept_peers();
         self.peer_check();
         self.command_peers_pump();
+        ctx.current().refresh_render_cache_with_options(
+            self,
+            ProcessRenderOptions {
+                detailed: TREE_DETAILED.load(Ordering::Relaxed),
+                colored: TREE_COLORED.load(Ordering::Relaxed),
+            },
+        );
         self.send_process_tree();
         self.send_log_entries();
 
@@ -416,6 +460,10 @@ impl ProcessBehavior for SystemDebugging {
             "Update period [ms]\t\t{}",
             self.update_period.as_millis()
         )]
+    }
+
+    fn process_tree_extra_lines(&self, _options: ProcessRenderOptions) -> Vec<String> {
+        self.process_tree_extra_lines()
     }
 }
 
@@ -550,6 +598,8 @@ mod tests {
         assert!(help.contains("Available commands"));
         assert!(help.contains("levelLog"));
         assert!(help.contains("levelLogSys"));
+        assert!(!help.contains("procTreeDetailedToggle"));
+        assert!(!help.contains("procTreeColoredToggle"));
 
         let mut auto = TcpStream::connect(("127.0.0.1", base + 6)).unwrap();
         auto.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
@@ -559,12 +609,15 @@ mod tests {
 
         let mut tree = TcpStream::connect(("127.0.0.1", base)).unwrap();
         tree.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-        let tree_text = strip_ansi(&read_until_contains(&mut tree, "SystemDebugging"));
+        let tree_text = strip_ansi(&read_until_contains(&mut tree, "TcpListening()"));
         assert!(tree_text.contains("Root()"));
         assert!(tree_text.contains("SystemDebugging()"));
+        assert!(tree_text.contains("Update period [ms]"));
+        assert!(tree_text.contains("TcpListening()"));
 
         let mut log = TcpStream::connect(("127.0.0.1", base + 2)).unwrap();
         log.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        thread::sleep(Duration::from_millis(80));
         user_info("integration-log-line");
         let log_text = read_until_contains(&mut log, "integration-log-line");
         assert!(log_text.contains("integration-log-line"));
