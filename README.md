@@ -11,7 +11,7 @@ This repository keeps the original project’s core model:
 - broadcast pipes
 - TCP-based debugging endpoints
 
-The port is intentionally Rust-native rather than a line-for-line transliteration of the C++ sources. The public surface is smaller, the memory model is owned/`Arc`-based, and host-side networking/debugging is implemented directly with `std`.
+The port is intentionally Rust-native rather than a line-for-line transliteration of the C++ sources. Ownership is `Arc`/`Mutex`-based instead of raw-pointer-based, but the host-side behavior is aligned against the original C++ implementation with direct conformance tests.
 
 ## Status
 
@@ -23,17 +23,18 @@ Implemented:
 - global log fan-out
 - generic `Pipe<T>`
 - host-side `TcpListening` and `TcpTransfering`
+- global command registration plus interactive and auto command sockets
 - `SystemDebugging` with process-tree, log, and command sockets
 - `tools/hello-world` equivalent as `examples/hello_world.rs`
 - single-wire protocol enums from `SingleWire.h`
+- conformance tests for scheduler lifecycle, tree rendering, command behavior, and debugger socket flows
 
 Not yet ported:
 
 - ESP-IDF-specific `EspWifiConnecting`
 - STM32 single-wire transport implementation
-- the original telnet-style line editor from `SystemCommanding.cpp`
 
-Those missing pieces are platform SDK integrations rather than core scheduler/runtime functionality, so the first Rust publish focuses on the portable host-side framework.
+Those remaining gaps are platform SDK integrations rather than host-side runtime behavior.
 
 ## Run
 

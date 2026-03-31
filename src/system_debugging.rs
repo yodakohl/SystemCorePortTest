@@ -3,11 +3,18 @@ use crate::net::{TcpListening, TcpTransfering};
 use crate::processing::{
     ProcessBehavior, ProcessContext, ProcessHandle, ProcessRenderOptions, Success,
 };
-use crate::system_commanding::{CommandHandler, CommandRegistry, SystemCommanding};
-use std::sync::Arc;
+use crate::system_commanding::{
+    INTERNAL_CMD_CLASS, SystemCommanding, cmd_reg, command_registry_snapshot,
+};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
+
+const CTRL_C_TELNET_SEQ: &[u8] = b"\xff\xf4\xff\xfd\x06";
+
+static SOCKET_LOG_LEVEL: AtomicUsize = AtomicUsize::new(LogSeverity::Info as usize);
+static TREE_DETAILED: AtomicBool = AtomicBool::new(true);
+static TREE_COLORED: AtomicBool = AtomicBool::new(true);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PeerType {
@@ -23,6 +30,7 @@ struct Peer {
 struct CommandPeer {
     connection: TcpTransfering,
     session: SystemCommanding,
+    closing: bool,
 }
 
 pub struct SystemDebugging {
@@ -35,95 +43,77 @@ pub struct SystemDebugging {
     cmd_auto_listener: Option<TcpListening>,
     peers: Vec<Peer>,
     command_peers: Vec<CommandPeer>,
-    registry: CommandRegistry,
     log_rx: Option<Receiver<crate::logging::LogEntry>>,
     tree_cache: String,
     tree_dirty: bool,
     peer_log_once_connected: bool,
     update_period: Duration,
     last_tree_send: Instant,
-    socket_log_level: Arc<AtomicUsize>,
-    tree_detailed: Arc<AtomicBool>,
-    tree_colored: Arc<AtomicBool>,
 }
 
 impl SystemDebugging {
     pub fn new(root: ProcessHandle) -> Self {
-        let socket_log_level = Arc::new(AtomicUsize::new(LogSeverity::Info as usize));
-        let tree_detailed = Arc::new(AtomicBool::new(true));
-        let tree_colored = Arc::new(AtomicBool::new(true));
-        let mut registry = CommandRegistry::new();
-
-        registry.register(
+        let _ = cmd_reg(
             "levelLog",
-            Arc::new(|args: &str| {
+            std::sync::Arc::new(|args: &str, _registry| {
                 let level = args.parse::<usize>().unwrap_or(3);
                 level_log_set(level);
-                format!("stdout log level set to {level}")
-            }) as CommandHandler,
-            "ll",
-            "set the stdout log level",
-            "dbg",
+                format!("Log level set to {level}")
+            }),
+            "",
+            "Set the log level for stdout",
+            INTERNAL_CMD_CLASS,
         );
 
-        {
-            let socket_log_level = socket_log_level.clone();
-            registry.register(
-                "levelLogSys",
-                Arc::new(move |args| {
-                    let level = args.parse::<usize>().unwrap_or(3);
-                    socket_log_level.store(level, Ordering::Relaxed);
-                    format!("socket log level set to {level}")
-                }),
-                "lls",
-                "set the socket log level",
-                "dbg",
-            );
-        }
+        let _ = cmd_reg(
+            "levelLogSys",
+            std::sync::Arc::new(|args: &str, _registry| {
+                let level = args.parse::<usize>().unwrap_or(3);
+                SOCKET_LOG_LEVEL.store(level, Ordering::Relaxed);
+                format!("System log level set to {level}")
+            }),
+            "",
+            "Set the log level for socket",
+            INTERNAL_CMD_CLASS,
+        );
 
-        {
-            let tree_detailed = tree_detailed.clone();
-            registry.register(
-                "treeDetailed",
-                Arc::new(move |args| {
-                    let enabled = match args.trim() {
-                        "0" | "false" | "off" => false,
-                        "1" | "true" | "on" => true,
-                        _ => !tree_detailed.load(Ordering::Relaxed),
-                    };
-                    tree_detailed.store(enabled, Ordering::Relaxed);
-                    format!(
-                        "detailed tree output {}",
-                        if enabled { "enabled" } else { "disabled" }
-                    )
-                }),
-                "td",
-                "toggle detailed tree output",
-                "dbg",
-            );
-        }
+        let _ = cmd_reg(
+            "procTreeDetailedToggle",
+            std::sync::Arc::new(|args: &str, _registry| {
+                let enabled = match args.trim() {
+                    "0" | "false" | "off" => false,
+                    "1" | "true" | "on" => true,
+                    _ => !TREE_DETAILED.load(Ordering::Relaxed),
+                };
+                TREE_DETAILED.store(enabled, Ordering::Relaxed);
+                format!(
+                    "Detailed process tree output {}",
+                    if enabled { "enabled" } else { "disabled" }
+                )
+            }),
+            "",
+            "Toggle detailed process-tree output",
+            INTERNAL_CMD_CLASS,
+        );
 
-        {
-            let tree_colored = tree_colored.clone();
-            registry.register(
-                "treeColored",
-                Arc::new(move |args| {
-                    let enabled = match args.trim() {
-                        "0" | "false" | "off" => false,
-                        "1" | "true" | "on" => true,
-                        _ => !tree_colored.load(Ordering::Relaxed),
-                    };
-                    tree_colored.store(enabled, Ordering::Relaxed);
-                    format!(
-                        "colored tree output {}",
-                        if enabled { "enabled" } else { "disabled" }
-                    )
-                }),
-                "tc",
-                "toggle colored tree output",
-                "dbg",
-            );
-        }
+        let _ = cmd_reg(
+            "procTreeColoredToggle",
+            std::sync::Arc::new(|args: &str, _registry| {
+                let enabled = match args.trim() {
+                    "0" | "false" | "off" => false,
+                    "1" | "true" | "on" => true,
+                    _ => !TREE_COLORED.load(Ordering::Relaxed),
+                };
+                TREE_COLORED.store(enabled, Ordering::Relaxed);
+                format!(
+                    "Colored process tree output {}",
+                    if enabled { "enabled" } else { "disabled" }
+                )
+            }),
+            "",
+            "Toggle colored process-tree output",
+            INTERNAL_CMD_CLASS,
+        );
 
         Self {
             root,
@@ -135,16 +125,12 @@ impl SystemDebugging {
             cmd_auto_listener: None,
             peers: Vec::new(),
             command_peers: Vec::new(),
-            registry,
             log_rx: None,
             tree_cache: String::new(),
             tree_dirty: true,
             peer_log_once_connected: false,
             update_period: Duration::from_millis(500),
             last_tree_send: Instant::now(),
-            socket_log_level,
-            tree_detailed,
-            tree_colored,
         }
     }
 
@@ -227,29 +213,73 @@ impl SystemDebugging {
 
         if let Some(listener) = &mut self.cmd_listener {
             let _ = listener.accept_ready();
-            while let Some(connection) = listener.next_peer() {
+            while let Some(mut connection) = listener.next_peer() {
+                let mut session = SystemCommanding::new();
+                for chunk in session.on_connect() {
+                    let _ = connection.queue_send(&chunk);
+                }
                 self.command_peers.push(CommandPeer {
                     connection,
-                    session: SystemCommanding::new(),
+                    session,
+                    closing: false,
                 });
             }
         }
 
         if let Some(listener) = &mut self.cmd_auto_listener {
             let _ = listener.accept_ready();
-            while let Some(connection) = listener.next_peer() {
+            while let Some(mut connection) = listener.next_peer() {
                 let mut session = SystemCommanding::new();
                 session.mode_auto_set();
+                for chunk in session.on_connect() {
+                    let _ = connection.queue_send(&chunk);
+                }
                 self.command_peers.push(CommandPeer {
                     connection,
                     session,
+                    closing: false,
                 });
             }
         }
     }
 
+    fn disconnect_requested(bytes: &[u8]) -> bool {
+        bytes
+            .first()
+            .is_some_and(|byte| *byte == 0x03 || *byte == 0x04)
+            || bytes.starts_with(CTRL_C_TELNET_SEQ)
+    }
+
+    fn peer_check(&mut self) {
+        self.peers.retain_mut(|peer| {
+            let disconnect_requested = match peer.connection.read_available() {
+                Ok(bytes) => Self::disconnect_requested(&bytes),
+                Err(_) => true,
+            };
+
+            if disconnect_requested {
+                peer.connection.done_set();
+            }
+
+            peer.connection.is_open()
+        });
+    }
+
     fn command_peers_pump(&mut self) {
+        let registry = command_registry_snapshot();
+
         self.command_peers.retain_mut(|peer| {
+            if peer.closing {
+                if peer.connection.flush_pending().is_err() {
+                    peer.connection.done_set();
+                }
+                if !peer.connection.has_pending_write() {
+                    peer.connection.done_set();
+                    return false;
+                }
+                return peer.connection.is_open();
+            }
+
             let data = match peer.connection.read_available() {
                 Ok(data) => data,
                 Err(_) => {
@@ -259,19 +289,33 @@ impl SystemDebugging {
             };
 
             if !data.is_empty() {
-                for response in peer.session.ingest(&data, &self.registry) {
-                    let mut line = response;
-                    line.push_str("\r\n");
-                    if peer.connection.queue_send(line.as_bytes()).is_err() {
+                let session_output = peer.session.ingest(&data, &registry);
+                for chunk in session_output.chunks {
+                    if peer.connection.queue_send(&chunk).is_err() {
                         peer.connection.done_set();
                         return false;
                     }
+                }
+
+                if session_output.disconnect {
+                    let disconnect_bytes = peer.session.disconnect_bytes();
+                    if !disconnect_bytes.is_empty() {
+                        let _ = peer.connection.queue_send(&disconnect_bytes);
+                    }
+                    peer.closing = true;
                 }
             }
 
             if peer.connection.flush_pending().is_err() {
                 peer.connection.done_set();
+                return false;
             }
+
+            if peer.closing && !peer.connection.has_pending_write() {
+                peer.connection.done_set();
+                return false;
+            }
+
             peer.connection.is_open()
         });
     }
@@ -283,8 +327,8 @@ impl SystemDebugging {
         }
 
         let tree = self.root.process_tree_string(ProcessRenderOptions {
-            detailed: self.tree_detailed.load(Ordering::Relaxed),
-            colored: self.tree_colored.load(Ordering::Relaxed),
+            detailed: TREE_DETAILED.load(Ordering::Relaxed),
+            colored: TREE_COLORED.load(Ordering::Relaxed),
         });
         if tree == self.tree_cache && !self.tree_dirty {
             return;
@@ -311,7 +355,7 @@ impl SystemDebugging {
     }
 
     fn send_log_entries(&mut self) {
-        let level = self.socket_log_level.load(Ordering::Relaxed);
+        let level = SOCKET_LOG_LEVEL.load(Ordering::Relaxed);
         let Some(rx) = &self.log_rx else {
             return;
         };
@@ -359,6 +403,7 @@ impl ProcessBehavior for SystemDebugging {
         }
 
         self.accept_peers();
+        self.peer_check();
         self.command_peers_pump();
         self.send_process_tree();
         self.send_log_entries();
@@ -371,5 +416,160 @@ impl ProcessBehavior for SystemDebugging {
             "Update period [ms]\t\t{}",
             self.update_period.as_millis()
         )]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::logging::user_info;
+    use crate::processing::{DriverMode, ProcessContext, drive_until_finished};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::thread;
+
+    fn read_until_contains(stream: &mut TcpStream, needle: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut out = Vec::new();
+        let mut buf = [0u8; 1024];
+
+        while Instant::now() < deadline {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(len) => {
+                    out.extend_from_slice(&buf[..len]);
+                    if String::from_utf8_lossy(&out).contains(needle) {
+                        break;
+                    }
+                }
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(err) => panic!("read failed: {err}"),
+            }
+        }
+
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    while let Some(next) = chars.next() {
+                        if next.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                continue;
+            }
+
+            out.push(ch);
+        }
+
+        out
+    }
+
+    fn find_free_port_base() -> u16 {
+        for base in (34000..38000).step_by(10) {
+            let listeners: Option<Vec<_>> = [base, base + 2, base + 4, base + 6]
+                .into_iter()
+                .map(|port| TcpListener::bind(("127.0.0.1", port)).ok())
+                .collect();
+            if let Some(listeners) = listeners {
+                drop(listeners);
+                return base;
+            }
+        }
+        panic!("no free port range found");
+    }
+
+    struct Root {
+        started: bool,
+        port_start: u16,
+    }
+
+    impl ProcessBehavior for Root {
+        fn name(&self) -> &str {
+            "Root"
+        }
+
+        fn process(&mut self, ctx: &mut ProcessContext) -> Success {
+            if !self.started {
+                self.started = true;
+                let mut debugger = SystemDebugging::new(ctx.current());
+                debugger.listen_local_set();
+                debugger.port_start_set(self.port_start);
+                ctx.start(ProcessHandle::new(debugger), DriverMode::Parent);
+            }
+            Success::Pending
+        }
+    }
+
+    #[test]
+    fn debugger_ports_expose_tree_logs_and_commands() {
+        let base = find_free_port_base();
+        let root = ProcessHandle::new(Root {
+            started: false,
+            port_start: base,
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_bg = stop.clone();
+        let root_bg = root.clone();
+
+        let driver = thread::spawn(move || {
+            while !stop_bg.load(Ordering::Relaxed) {
+                root_bg.drive_for(4);
+                thread::sleep(Duration::from_millis(5));
+            }
+            root_bg.unused_set();
+            let _ = drive_until_finished(&root_bg, 4, Duration::from_millis(5));
+        });
+
+        thread::sleep(Duration::from_millis(150));
+
+        let mut cmd = TcpStream::connect(("127.0.0.1", base + 4)).unwrap();
+        cmd.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let welcome = read_until_contains(&mut cmd, "System Terminal");
+        assert!(welcome.contains("System Terminal"));
+        assert!(welcome.contains("core@app:~#"));
+
+        cmd.write_all(b"help\r").unwrap();
+        let help = read_until_contains(&mut cmd, "levelLogSys");
+        assert!(help.contains("Available commands"));
+        assert!(help.contains("levelLog"));
+        assert!(help.contains("levelLogSys"));
+
+        let mut auto = TcpStream::connect(("127.0.0.1", base + 6)).unwrap();
+        auto.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        auto.write_all(b"help\n").unwrap();
+        let auto_help = read_until_contains(&mut auto, "Available commands");
+        assert!(auto_help.contains("Available commands"));
+
+        let mut tree = TcpStream::connect(("127.0.0.1", base)).unwrap();
+        tree.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let tree_text = strip_ansi(&read_until_contains(&mut tree, "SystemDebugging"));
+        assert!(tree_text.contains("Root()"));
+        assert!(tree_text.contains("SystemDebugging()"));
+
+        let mut log = TcpStream::connect(("127.0.0.1", base + 2)).unwrap();
+        log.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        user_info("integration-log-line");
+        let log_text = read_until_contains(&mut log, "integration-log-line");
+        assert!(log_text.contains("integration-log-line"));
+
+        stop.store(true, Ordering::Relaxed);
+        driver.join().unwrap();
     }
 }

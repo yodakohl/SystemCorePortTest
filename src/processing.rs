@@ -515,13 +515,12 @@ impl ProcessHandle {
         let mut drawn = 0usize;
         for child in children {
             child.render_into(out, options);
-            drawn += 1;
-            if drawn >= 10 {
-                let remaining = child.inner.runtime.lock().unwrap().children.len();
-                if remaining > 0 {
-                    out.push_str(&" ".repeat(level_tree as usize * 2 + 2));
-                    out.push_str("..\r\n");
-                }
+            if !child.inner.runtime.lock().unwrap().tree_hidden {
+                drawn += 1;
+            }
+            if drawn >= 11 {
+                out.push_str(&" ".repeat(level_tree as usize * 2 + 2));
+                out.push_str("..\r\n");
                 break;
             }
         }
@@ -833,5 +832,61 @@ mod tests {
             proc.process_tree_string(ProcessRenderOptions::default())
         );
         assert_eq!(proc.success(), Success::Positive);
+    }
+
+    struct HiddenChild;
+
+    impl ProcessBehavior for HiddenChild {
+        fn name(&self) -> &str {
+            "HiddenChild"
+        }
+
+        fn process(&mut self, ctx: &mut ProcessContext) -> Success {
+            ctx.proc_tree_display_set(false);
+            Success::Pending
+        }
+    }
+
+    struct ManyChildren {
+        started: bool,
+    }
+
+    struct VisiblePendingChild;
+
+    impl ProcessBehavior for VisiblePendingChild {
+        fn name(&self) -> &str {
+            "VisiblePendingChild"
+        }
+
+        fn process(&mut self, _ctx: &mut ProcessContext) -> Success {
+            Success::Pending
+        }
+    }
+
+    impl ProcessBehavior for ManyChildren {
+        fn name(&self) -> &str {
+            "ManyChildren"
+        }
+
+        fn process(&mut self, ctx: &mut ProcessContext) -> Success {
+            if !self.started {
+                self.started = true;
+                for _ in 0..12 {
+                    ctx.start(ProcessHandle::new(VisiblePendingChild), DriverMode::Parent);
+                }
+                ctx.start(ProcessHandle::new(HiddenChild), DriverMode::Parent);
+            }
+            Success::Pending
+        }
+    }
+
+    #[test]
+    fn process_tree_matches_cpp_child_cap_behavior() {
+        let proc = ProcessHandle::new(ManyChildren { started: false });
+        proc.drive_for(4);
+        let tree = proc.process_tree_string(ProcessRenderOptions::default());
+        assert_eq!(tree.matches("VisiblePendingChild()").count(), 11);
+        assert!(tree.contains("..\r\n"));
+        assert!(!tree.contains("HiddenChild()"));
     }
 }

@@ -175,6 +175,10 @@ impl TcpTransfering {
         let _ = self.stream.shutdown(Shutdown::Both);
     }
 
+    pub fn has_pending_write(&self) -> bool {
+        !self.pending_write.is_empty()
+    }
+
     pub fn addr_remote(&self) -> Option<SocketAddr> {
         self.remote_addr
     }

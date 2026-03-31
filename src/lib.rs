@@ -21,5 +21,8 @@ pub use single_wire::{
     SingleWireFlowDirection, SingleWireFrameContent, SingleWireSchedulerContent,
     SingleWireTargetContent,
 };
-pub use system_commanding::{CommandRegistry, SystemCommand, SystemCommanding};
+pub use system_commanding::{
+    CommandRegistry, INTERNAL_CMD_CLASS, SystemCommand, SystemCommanding, cmd_reg,
+    command_registry_snapshot, hex_dump_bytes,
+};
 pub use system_debugging::SystemDebugging;
