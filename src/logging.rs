@@ -1,8 +1,13 @@
 /*
-  Derived from fractal-programming/SystemCore
+  This file is part of the DSP-Crowd project
+  https://www.dsp-crowd.com
 
-  Copyright (c) 2023 Fractal Programming
-  Copyright (c) 2026 yodakohl
+  Author(s):
+      - Johannes Natter, office@dsp-crowd.com
+
+  File created on 14.09.2018
+
+  Copyright (C) 2018, Johannes Natter
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal
